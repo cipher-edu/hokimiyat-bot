@@ -1,7 +1,7 @@
 # main.py
 
 """
-Telegram Ovoz Berish Boti (Refactored Version)
+Telegram Ovoz Berish Boti (Refactored & Render.com'ga moslashtirilgan)
 
 Ushbu bot quyidagi funksiyalarni amalga oshiradi:
 - Foydalanuvchilarni majburiy kanallarga a'zoligini tekshirish.
@@ -16,9 +16,6 @@ Texnologiyalar steki:
 - Redis (FSM va CAPTCHA uchun)
 - Pydantic Settings (.env fayli uchun)
 - Cryptography (ma'lumotlarni shifrlash uchun)
-
-Ishga tushirish uchun kerakli kutubxonalar:
-pip install aiogram sqlalchemy alembic aiosqlite redis pydantic pydantic-settings cryptography
 """
 
 import asyncio
@@ -79,14 +76,13 @@ class Settings(BaseSettings):
     BOT_TOKEN: SecretStr
     ADMIN_IDS_STR: str = Field("12345678", alias='ADMIN_IDS')
     REQUIRED_CHANNELS_STR: str = Field("", alias='REQUIRED_CHANNELS')
-
-    # Muhim: Bu kalitni bir marta generatsiya qiling va .env fayliga saqlang.
-    # Generatsiya qilish uchun: python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
     ENCRYPTION_KEY: SecretStr
 
     DB_NAME: str = "vote_bot_prod.db"
+    
     REDIS_HOST: str = "localhost"
     REDIS_PORT: int = 6379
+    REDIS_PASSWORD: Optional[str] = None
     REDIS_DB_FSM: int = 0
     REDIS_DB_CAPTCHA: int = 1
 
@@ -101,7 +97,18 @@ class Settings(BaseSettings):
 
     @property
     def DATABASE_URL(self) -> str:
-        db_path = os.path.join(BASE_DIR, self.DB_NAME)
+        """ Ma'lumotlar bazasi URL manzilini Render.com dagi diskka moslashtiradi """
+        render_disk_path = "/var/data/db" 
+        
+        if os.path.exists(render_disk_path):
+            base_path = render_disk_path
+        else:
+            base_path = BASE_DIR
+        
+        os.makedirs(base_path, exist_ok=True)
+        
+        db_path = os.path.join(base_path, self.DB_NAME)
+        logger.info(f"Database path: {db_path}")
         return f"sqlite+aiosqlite:///{db_path}"
 
     @property
@@ -131,7 +138,6 @@ except Exception as e:
 
 # --- 2. Shifrlash Xizmati (CryptoService) ---
 class CryptoService:
-    """ Ma'lumotlarni xavfsiz shifrlash va deshifrlash uchun servis """
     def __init__(self, key: bytes):
         try:
             self.fernet = Fernet(key)
@@ -284,7 +290,7 @@ class CaptchaService:
         correct_answer_bytes = await self.redis.get(redis_key_answer)
         if not correct_answer_bytes: return False
 
-        if correct_answer_bytes.decode() == user_answer.strip():
+        if correct_answer_bytes == user_answer.strip():
             await self.redis.delete(redis_key_answer, redis_key_attempts)
             return True
         else:
@@ -300,7 +306,7 @@ class CaptchaService:
     async def get_attempts_left(self, user_id: int) -> int:
         attempts_made_bytes = await self.redis.get(f"captcha:{user_id}:attempts")
         if attempts_made_bytes:
-            return self.max_attempts - int(attempts_made_bytes.decode())
+            return self.max_attempts - int(attempts_made_bytes)
         return self.max_attempts
 
 
@@ -374,7 +380,6 @@ class DbSessionMiddleware(BaseMiddleware):
 
 # --- 8. Yordamchi Funksiyalar ---
 async def check_all_channels_membership(bot: Bot, user_id: int) -> List[Dict[str, str]]:
-    """ Foydalanuvchining barcha kerakli kanallarga a'zoligini tekshiradi """
     unsubscribed_channels = []
     if not settings.REQUIRED_CHANNELS:
         return []
@@ -383,15 +388,14 @@ async def check_all_channels_membership(bot: Bot, user_id: int) -> List[Dict[str
         try:
             member = await bot.get_chat_member(chat_id=channel_id, user_id=user_id)
             if member.status not in ("member", "administrator", "creator"):
-                raise TelegramBadRequest(message="User is not a member") # A'zo emasligini xato sifatida ko'rish
-        except TelegramBadRequest: # Xato ushlansa (foydalanuvchi a'zo emas yoki topilmadi)
+                raise TelegramBadRequest(message="User is not a member")
+        except TelegramBadRequest:
             try:
                 chat = await bot.get_chat(channel_id)
                 invite_link = chat.invite_link or f"https://t.me/{chat.username}"
                 unsubscribed_channels.append({"title": chat.title, "url": invite_link})
             except Exception as e:
                 logger.error(f"Majburiy kanal ({channel_id}) ma'lumotlarini olib bo'lmadi: {e}")
-                # Fallback, agar kanal ma'lumotini olib bo'lmasa
                 unsubscribed_channels.append({"title": f"Kanal ({channel_id})", "url": "#error"})
         except Exception as e:
             logger.error(f"Kanal tekshirishda kutilmagan xatolik ({channel_id}): {e}", exc_info=True)
@@ -479,7 +483,6 @@ async def cb_admin_poll_toggle(callback: CallbackQuery, session: AsyncSession):
 
     await callback.answer(f"Status {'🟢 Aktiv' if updated_poll.is_active else '⚪️ Noaktiv'} holatiga o'zgartirildi.", show_alert=True)
     
-    # Refresh view
     await cb_admin_poll_view(callback, session)
 
 @admin_router.callback_query(F.data.startswith("admin:poll:results:"))
@@ -655,39 +658,44 @@ async def process_vote_choice(callback: CallbackQuery, state: FSMContext, sessio
 # --- 10. Botni Ishga Tushirish ---
 async def main():
     """ Botni ishga tushiruvchi asosiy funksiya """
-    # Servislarni sozlash
     crypto_service = CryptoService(settings.ENCRYPTION_KEY.get_secret_value().encode())
     
-    redis_fsm = aioredis.Redis(host=settings.REDIS_HOST, port=settings.REDIS_PORT, db=settings.REDIS_DB_FSM)
-    redis_captcha = aioredis.Redis(host=settings.REDIS_HOST, port=settings.REDIS_PORT, db=settings.REDIS_DB_CAPTCHA)
-    captcha_service = CaptchaService(redis_captcha)
+    redis_connection_params = {
+        "host": settings.REDIS_HOST,
+        "port": settings.REDIS_PORT,
+        "decode_responses": True
+    }
+    if settings.REDIS_PASSWORD:
+        redis_connection_params["password"] = settings.REDIS_PASSWORD
+        logger.info("Redis'ga parol bilan ulanilmoqda.")
+    else:
+        logger.info("Redis'ga parolsiz ulanilmoqda.")
+        
+    redis_fsm_client = aioredis.Redis(db=settings.REDIS_DB_FSM, **redis_connection_params)
+    redis_captcha_client = aioredis.Redis(db=settings.REDIS_DB_CAPTCHA, **redis_connection_params)
+
+    captcha_service = CaptchaService(redis_captcha_client)
+    storage = RedisStorage(redis=redis_fsm_client)
     
-    storage = RedisStorage(redis=redis_fsm)
-    
-    # Bot va Dispatcher obyektlari
     bot = Bot(token=settings.BOT_TOKEN.get_secret_value(), default=DefaultBotProperties(parse_mode=ParseMode.HTML))
     dp = Dispatcher(storage=storage)
 
-    # Servislarni va DB sessiyasini middleware/workflow_data orqali handlerlarga uzatish
     dp.update.middleware(DbSessionMiddleware(session_pool=AsyncSessionFactory))
     dp.workflow_data.update({
         "crypto_service": crypto_service,
         "captcha_service": captcha_service
     })
 
-    # Routerlarni ulash
     dp.include_router(admin_router)
     dp.include_router(user_router)
     
-    # Botni ishga tushirishdan oldin tekshiruvlar
     await create_db_and_tables()
 
     logger.info("Bot ishga tushirilmoqda...")
     try:
-        # Redis bilan ulanishni tekshirish
-        await redis_fsm.ping()
+        await redis_fsm_client.ping()
         logger.info(f"FSM uchun Redis'ga ulanish muvaffaqiyatli (DB {settings.REDIS_DB_FSM}).")
-        await redis_captcha.ping()
+        await redis_captcha_client.ping()
         logger.info(f"CAPTCHA uchun Redis'ga ulanish muvaffaqiyatli (DB {settings.REDIS_DB_CAPTCHA}).")
         
         await bot.delete_webhook(drop_pending_updates=True)
@@ -695,13 +703,13 @@ async def main():
 
     except RedisConnectionError as e:
         logger.critical(f"Redis serveriga ulanib bo'lmadi: {e}")
-        logger.critical("Iltimos, Redis serveri ishlayotganligini va .env faylidagi sozlamalar (REDIS_HOST, REDIS_PORT) to'g'riligini tekshiring.")
+        logger.critical("Iltimos, Redis serveri ishlayotganligini va .env faylidagi yoki Render'dagi sozlamalar to'g'riligini tekshiring.")
     except Exception as e:
         logger.critical(f"Botni ishga tushirishda kutilmagan xatolik: {e}", exc_info=True)
     finally:
         await bot.session.close()
-        await redis_fsm.close()
-        await redis_captcha.close()
+        await redis_fsm_client.close()
+        await redis_captcha_client.close()
         logger.info("Bot to'xtatildi va resurslar yopildi.")
 
 
