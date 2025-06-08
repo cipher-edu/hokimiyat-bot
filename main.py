@@ -57,7 +57,7 @@ class AppSettings:
     ADMIN_IDS: List[int] = [1062838548] # <-- ADMIN ID
     REQUIRED_CHANNELS: List[Union[str, int]] = [-1002217048438, "@adsasdsfeqf3"] # <-- KANALLAR
     
-    ENCRYPTION_KEY: str = "gAAAAABmeQG1t2b3f4c5d6e7f8a9b0c1d2e3f4g5h6i7j8k9l0m1n2o3p4q5r6s7t8u9"
+    ENCRYPTION_KEY: str = "AJUcGHHG2TItJ_Bf0Lcqn_NsKHDazXKinREdJt88PWM="
     DB_NAME: str = "vote_bot_hardcoded.db"
     
     CAPTCHA_TIMEOUT_SECONDS: int = 60
@@ -323,7 +323,7 @@ async def main():
     bot = Bot(token=settings.BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
     dp = Dispatcher(storage=storage)
 
-    dp.update.middleware(DbSessionMiddleware(session_pool=AsyncSessionFactory))
+    dp.update.middleware(DbSessionMiddleware(pool=AsyncSessionFactory))
     dp.workflow_data.update({
         "crypto_service": crypto_service,
         "captcha_service": captcha_service,
@@ -349,4 +349,4 @@ if __name__ == "__main__":
     try:
         asyncio.run(main())
     except (KeyboardInterrupt, SystemExit):
-        logger.info("Bot foydalanuvchi tomonidan to'xtatildi.")
+        logger.info("Bot foydalanuchi tomonidan to'xtatildi.")
