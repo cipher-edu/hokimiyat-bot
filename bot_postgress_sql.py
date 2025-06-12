@@ -1,5 +1,3 @@
-# bot_postgress_sql.py (SQLite va PostgreSQL'ni qo'llab-quvvatlaydi)
-
 import asyncio
 import logging
 import os
@@ -184,7 +182,6 @@ async def check_all_channels_membership(bot: Bot, user_id: int) -> List[Dict[str
             else: logger.error(f"Kanal tekshirishda kutilmagan xatolik ({channel_id}): {e}", exc_info=True)
     return unsubscribed
 
-# --- 9. Handlerlar (Routers) ---
 admin_router = Router(); admin_router.message.filter(F.from_user.id.in_(settings.ADMIN_IDS)); admin_router.callback_query.filter(F.from_user.id.in_(settings.ADMIN_IDS))
 user_router = Router()
 
@@ -276,7 +273,6 @@ async def broadcast_confirmation(message: Message, state: FSMContext, session: A
         except Exception as e: logger.error(f"Reklamani {user_id} ga yuborishda xato: {e}"); failure += 1
     await message.answer(f"Yuborish yakunlandi.\n\n✅ Muvaffaqiyatli: <b>{success}</b>\n❌ Xatolik: <b>{failure}</b>")
 
-# User Handlers
 @user_router.message(CommandStart())
 async def cmd_start(message: Message, state: FSMContext, session: AsyncSession, bot: Bot, command: CommandObject = None):
     await state.clear(); await get_or_create_user(session, message.from_user.id, message.from_user.username, message.from_user.first_name)
@@ -348,8 +344,6 @@ async def process_vote_choice(callback_query: CallbackQuery, state: FSMContext, 
     except Exception as e: logger.error(f"Ovoz berishda xato: {e}"); await callback_query.message.edit_text("Texnik nosozlik."); await callback_query.answer("Xatolik!", show_alert=True)
     await state.clear()
 
-
-# --- 10. Botni Ishga Tushirish ---
 async def main():
     redis_connection_params = {"host": settings.REDIS_HOST, "port": settings.REDIS_PORT}
     if settings.REDIS_PASSWORD: redis_connection_params["password"] = settings.REDIS_PASSWORD
