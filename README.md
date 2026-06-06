@@ -182,3 +182,33 @@ Botni doimiy ishlab turishi uchun **VPS/VDS** (masalan, DigitalOcean, Hetzner) y
 
 *   **Render.com:** Eng oson va qulay variant. Bepul rejalari doirasida `PostgreSQL`, `Redis` va `Web Service`'ni birgalikda ishga tushirish mumkin.
 *   **VPS:** To'liq nazoratni beradi. `PostgreSQL` va `Redis`'ni o'zingiz o'rnatib, botni `systemd` servisi orqali doimiy ishga tushirishingiz kerak bo'ladi.
+
+## 🐳 Docker yordamida ishga tushirish
+
+Loyihani Docker orqali ishga tushirish uchun quyidagi fayllar qo'shildi:
+
+- `Dockerfile` — ilovaning Docker imijini yaratadi.
+- `docker-compose.yml` — `app`, `db` (Postgres) va `redis` servislarini boshqaradi.
+- `.env.example` — atrof-muhit o'zgaruvchilarining namunasi.
+
+Qadamlar:
+
+1. `.env.example` ni nusxa ko'chirib `.env` deb nomlang va kerakli qiymatlarni to'ldiring.
+
+2. Docker Compose orqali ishga tushirish:
+
+```bash
+docker compose up --build -d
+```
+
+3. Loglarni ko'rish:
+
+```bash
+docker compose logs -f app
+```
+
+4. Agar `DB_TYPE=postgresql` bo'lsa, `.env` ichidagi `POSTGRES_*` sozlamalarining `docker-compose.yml` dagi `db` servisi bilan mos kelishiga ishonch hosil qiling (`POSTGRES_HOST=db`).
+
+5. Agar siz `Redis`ni ishlatmasangiz va `main.py` bilan davom etmoqchi bo'lsangiz, `.env` ichidagi `DB_TYPE` ni `sqlite` qilib qo'ying va `command`ni mos faylga o'zgartiring (masalan `python main.py`).
+
+Savol yoki yordam kerak bo'lsa, xohlaysizmi docker imijini ham build qilib sinab chiqsam?

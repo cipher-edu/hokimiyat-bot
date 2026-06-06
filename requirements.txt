@@ -1,7 +1,9 @@
-aiogram
-sqlalchemy
-aiosqlite
-redis
-pydantic
-pydantic-settings
-cryptography
+aiogram==3.9.0
+SQLAlchemy==2.0.25
+asyncpg==0.30.0
+aiosqlite==0.20.0
+redis==5.0.1
+pydantic==2.5.3
+pydantic-settings==2.1.0
+cryptography==41.0.7
+python-dotenv==1.0.0
