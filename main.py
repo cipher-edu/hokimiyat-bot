@@ -32,9 +32,9 @@ logger = logging.getLogger(__name__)
 
 
 class AppSettings:
-    BOT_TOKEN: str = "bot tokenini shu yerga yozing"
+    BOT_TOKEN: str = "7572941718:AAF9DxtXv5L5yGi9PQwcIM9B3EKiJ8cjfEk"
     ADMIN_IDS: List[int] = [1062838548]
-    REQUIRED_CHANNELS: List[Union[str, int]] = [-1002217048438, "@adsasdsfeqf3"]
+    REQUIRED_CHANNELS: List[Union[str, int]] = [-1002217048438, "@NavDU_YI", "@Otkir_Rahmat"]
     ENCRYPTION_KEY: str = "AJUcGHHG2TItJ_Bf0Lcqn_NsKHDazXKinREdJt88PWM="
     DB_NAME: str = "vote_bot_broadcast.db"
     CAPTCHA_TIMEOUT_SECONDS: int = 60

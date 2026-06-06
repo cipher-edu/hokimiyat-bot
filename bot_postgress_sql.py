@@ -39,6 +39,7 @@ class Settings(BaseSettings):
     BOT_TOKEN: SecretStr
     ADMIN_IDS_STR: str = Field("1062838548", alias='ADMIN_IDS')
     REQUIRED_CHANNELS_STR: str = Field("", alias='REQUIRED_CHANNELS')
+    OPTIONAL_CHANNELS_STR: str = Field("", alias='OPTIONAL_CHANNELS')
     ENCRYPTION_KEY: SecretStr
     
     DB_TYPE: str = "sqlite"
@@ -88,10 +89,28 @@ class Settings(BaseSettings):
                 try: channels.append(int(ch))
                 except ValueError: logger.warning(f"Kanal IDsi '{ch}' noto'g'ri formatda.")
         return channels
+    @property
+    def OPTIONAL_CHANNELS(self) -> List[Union[str, int]]:
+        channels = []
+        if not self.OPTIONAL_CHANNELS_STR:
+            return []
+        for ch_str in self.OPTIONAL_CHANNELS_STR.split(','):
+            ch = ch_str.strip()
+            if not ch: continue
+            if ch.startswith('@') or ch.startswith('-100'):
+                channels.append(ch)
+            else:
+                try: channels.append(int(ch))
+                except ValueError: logger.warning(f"Optional kanal IDsi '{ch}' noto'g'ri formatda.")
+        return channels
 try:
     settings = Settings()
 except Exception as e:
     logger.critical(f".env faylini yuklashda xatolik: {e}. Majburiy maydonlarni tekshiring."); exit(1)
+
+# Log parsed channels for debugging
+logger.info(f"Parsed REQUIRED_CHANNELS: {settings.REQUIRED_CHANNELS}")
+logger.info(f"Parsed OPTIONAL_CHANNELS: {settings.OPTIONAL_CHANNELS}")
 
 class CryptoService:
     def __init__(self, key: SecretStr):
@@ -165,21 +184,29 @@ def get_ad_post_keyboard(poll: Poll, bot_username: str) -> InlineKeyboardMarkup:
 remove_keyboard = ReplyKeyboardRemove()
 
 async def check_all_channels_membership(bot: Bot, user_id: int) -> List[Dict[str, str]]:
-    unsubscribed = [];
-    if not settings.REQUIRED_CHANNELS: return []
-    for channel_id in settings.REQUIRED_CHANNELS:
+    unsubscribed = []
+    required = settings.REQUIRED_CHANNELS or []
+    if not required:
+        logger.debug("Hech qanday majburiy kanal belgilanmagan.")
+        return []
+    for channel_id in required:
         try:
+            logger.debug(f"Tekshirilmoqda kanal: {channel_id} uchun foydalanuvchi: {user_id}")
             member = await bot.get_chat_member(chat_id=channel_id, user_id=user_id)
-            if member.status not in ("member", "administrator", "creator"): raise Exception("User is not a subscribed member.")
+            if member.status not in ("member", "administrator", "creator"):
+                raise TelegramBadRequest("User is not a subscribed member")
+        except TelegramBadRequest as e:
+            try:
+                chat = await bot.get_chat(channel_id)
+                invite_link = getattr(chat, 'invite_link', None) or (f"https://t.me/{chat.username}" if getattr(chat, 'username', None) else None)
+                if invite_link:
+                    unsubscribed.append({"title": chat.title or str(channel_id), "url": invite_link})
+                else:
+                    logger.warning(f"Kanal ({channel_id}) uchun havola topilmadi.")
+            except Exception as ex_info:
+                logger.error(f"Kanal ({channel_id}) ma'lumotini olishda xatolik: {ex_info}")
         except Exception as e:
-            if isinstance(e, TelegramBadRequest) or "User is not a subscribed member" in str(e):
-                try:
-                    chat = await bot.get_chat(channel_id)
-                    invite_link = getattr(chat,'invite_link',None) or (f"https://t.me/{chat.username}" if getattr(chat,'username',None) else None)
-                    if invite_link: unsubscribed.append({"title": chat.title, "url": invite_link})
-                    else: logger.warning(f"Kanal ({channel_id}) uchun havola topilmadi.")
-                except Exception as ex_info: logger.error(f"Kanal ({channel_id}) ma'lumotini olishda xatolik: {ex_info}")
-            else: logger.error(f"Kanal tekshirishda kutilmagan xatolik ({channel_id}): {e}", exc_info=True)
+            logger.error(f"Kanal tekshirishda kutilmagan xatolik ({channel_id}): {e}", exc_info=True)
     return unsubscribed
 
 admin_router = Router(); admin_router.message.filter(F.from_user.id.in_(settings.ADMIN_IDS)); admin_router.callback_query.filter(F.from_user.id.in_(settings.ADMIN_IDS))
