@@ -131,15 +131,17 @@ async def create_db_and_tables():
 async def get_or_create_user(session: AsyncSession, user_id: int, username: str = None, first_name: str = None) -> User: r = await session.execute(select(User).where(User.id == user_id)); user = r.scalar_one_or_none();_ = user or (user := User(id=user_id, username=username, first_name=first_name), session.add(user), await session.commit(), await session.refresh(user)); return user
 async def save_user_phone(session: AsyncSession, user_id: int, encrypted_phone: bytes): await session.execute(update(User).where(User.id==user_id).values(phone_number_encrypted=encrypted_phone)); await session.commit()
 async def get_active_poll(session: AsyncSession) -> Optional[Poll]: return await session.scalar(select(Poll).where(Poll.is_active==True).order_by(Poll.created_at.desc()).limit(1))
+async def get_active_polls(session: AsyncSession) -> List[Poll]: return (await session.execute(select(Poll).where(Poll.is_active==True).order_by(Poll.created_at.desc()))).scalars().all()
+async def get_unvoted_active_polls(session: AsyncSession, user_id: int) -> List[Poll]:
+    voted_subq = select(Vote.poll_id).where(Vote.user_id == user_id).scalar_subquery()
+    return (await session.execute(select(Poll).where(Poll.is_active==True, Poll.id.notin_(voted_subq)).order_by(Poll.created_at.desc()))).scalars().all()
 async def get_poll_by_id(session: AsyncSession, poll_id: int) -> Optional[Poll]: return await session.get(Poll, poll_id)
 async def has_user_voted(session: AsyncSession, user_id: int, poll_id: int) -> bool: return await session.scalar(select(Vote.id).where(Vote.user_id==user_id, Vote.poll_id==poll_id).limit(1)) is not None
 async def add_vote(session: AsyncSession, user_id: int, poll_id: int, choice_key: str): session.add(Vote(user_id=user_id, poll_id=poll_id, choice_key=choice_key)); await session.commit()
 async def create_poll(session: AsyncSession, question: str, options: Dict[str, str], admin_id: int, is_active: bool = False) -> Poll:
-    if is_active: await session.execute(update(Poll).values(is_active=False))
     poll = Poll(question=question, options=options, created_by_admin_id=admin_id, is_active=is_active); session.add(poll); await session.commit(); await session.refresh(poll); return poll
 async def get_all_polls(session: AsyncSession) -> List[Poll]: return (await session.execute(select(Poll).order_by(Poll.created_at.desc()))).scalars().all()
 async def set_poll_active_status(session: AsyncSession, poll_id: int, active: bool) -> Optional[Poll]:
-    if active: await session.execute(update(Poll).values(is_active=False))
     result = await session.execute(update(Poll).where(Poll.id == poll_id).values(is_active=active).returning(Poll)); await session.commit(); return result.scalar_one_or_none()
 async def get_poll_results(session: AsyncSession, poll_id: int) -> Dict[str, int]:
     result = await session.execute(select(Vote.choice_key, func.count(Vote.id).label("c")).where(Vote.poll_id == poll_id).group_by(Vote.choice_key)); return {row.choice_key: row.c for row in result.all()}
@@ -162,7 +164,7 @@ class CaptchaService:
         attempts = await self.redis.get(f"captcha:{user_id}:attempts")
         return settings.CAPTCHA_MAX_ATTEMPTS - int(attempts) if attempts else settings.CAPTCHA_MAX_ATTEMPTS
 
-class VotingProcess(StatesGroup): awaiting_subscription_check=State();awaiting_contact=State();awaiting_captcha=State();awaiting_vote_choice=State()
+class VotingProcess(StatesGroup): awaiting_subscription_check=State();awaiting_contact=State();awaiting_captcha=State();awaiting_poll_selection=State();awaiting_vote_choice=State()
 class AdminPollManagement(StatesGroup): awaiting_poll_question=State();awaiting_poll_options=State()
 class AdCreation(StatesGroup): awaiting_poll_selection=State();awaiting_post_text=State();awaiting_post_photo=State()
 class Broadcast(StatesGroup): awaiting_ad_text=State();awaiting_ad_photo=State();awaiting_confirmation=State()
@@ -176,6 +178,7 @@ def get_contact_keyboard()->ReplyKeyboardMarkup:return ReplyKeyboardMarkup(keybo
 def get_channel_subscription_keyboard(channels: List[Dict[str, str]], button_text: str = "✅ A'zo bo'ldim") -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder();[builder.row(InlineKeyboardButton(text=f"➡️ {c['title']}", url=c['url'])) for c in channels];builder.row(InlineKeyboardButton(text=button_text, callback_data="check_subscription"));return builder.as_markup()
 def get_poll_options_keyboard(poll: Poll) -> InlineKeyboardMarkup: builder = InlineKeyboardBuilder();[builder.row(InlineKeyboardButton(text=t, callback_data=f"vote_poll:{poll.id}:choice:{k}")) for k,t in poll.options.items()];return builder.as_markup()
+def get_active_polls_keyboard(polls: List[Poll]) -> InlineKeyboardMarkup: builder = InlineKeyboardBuilder();[builder.row(InlineKeyboardButton(text=f"📊 {p.question[:50]}", callback_data=f"select_poll:{p.id}")) for p in polls];return builder.as_markup()
 def get_admin_poll_list_keyboard(polls: List[Poll]) -> InlineKeyboardMarkup: builder = InlineKeyboardBuilder();[builder.row(InlineKeyboardButton(text=f"{'🟢' if p.is_active else '⚪️'} {p.question[:35]}...", callback_data=f"admin:poll:view:{p.id}")) for p in polls];builder.row(InlineKeyboardButton(text="➕ Yangi so'rovnoma", callback_data="admin:poll:create"));return builder.as_markup()
 def get_admin_poll_manage_keyboard(poll_id: int, is_active: bool) -> InlineKeyboardMarkup: builder = InlineKeyboardBuilder();builder.row(InlineKeyboardButton(text="⚪️ Noaktiv qilish" if is_active else "🟢 Aktiv qilish", callback_data=f"admin:poll:toggle:{poll_id}"));builder.row(InlineKeyboardButton(text="📊 Natijalar", callback_data=f"admin:poll:results:{poll_id}"));builder.row(InlineKeyboardButton(text="🔙 Ortga", callback_data="admin:poll:list"));return builder.as_markup()
 def get_poll_selection_for_ad_keyboard(polls: List[Poll]) -> InlineKeyboardMarkup: builder = InlineKeyboardBuilder();[builder.row(InlineKeyboardButton(text=f"{p.question[:40]}...", callback_data=f"ad_select_poll:{p.id}")) for p in polls];return builder.as_markup()
@@ -438,13 +441,30 @@ async def process_captcha_answer(message: Message, state: FSMContext, session: A
     if await captcha_service.is_user_blocked(user_id): await message.answer("Siz vaqtinchalik bloklangansiz."); await state.clear(); return
     is_correct = await captcha_service.verify_captcha(user_id, message.text)
     if is_correct:
-        await message.answer("✅ To'g'ri!"); active_poll = await get_active_poll(session)
-        if not active_poll: await message.answer("Hozircha aktiv so'rovnomalar yo'q."); await state.clear(); return
-        if await has_user_voted(session, user_id, active_poll.id): await message.answer("Siz bu so'rovnomada allaqachon ovoz bergansiz."); await state.clear(); return
-        await message.answer(f"So'rovnoma:\n<b>{active_poll.question}</b>\n\nVariantni tanlang:", reply_markup=get_poll_options_keyboard(active_poll)); await state.set_state(VotingProcess.awaiting_vote_choice)
+        await message.answer("✅ To'g'ri!")
+        unvoted_polls = await get_unvoted_active_polls(session, user_id)
+        if not unvoted_polls: await message.answer("Hozircha ovoz bera oladigan aktiv so'rovnomalar yo'q."); await state.clear(); return
+        if len(unvoted_polls) == 1:
+            await message.answer(f"So'rovnoma:\n<b>{unvoted_polls[0].question}</b>\n\nVariantni tanlang:", reply_markup=get_poll_options_keyboard(unvoted_polls[0])); await state.set_state(VotingProcess.awaiting_vote_choice)
+        else:
+            await message.answer(f"<b>{len(unvoted_polls)}</b> ta aktiv so'rovnoma mavjud. Qaysi birida ovoz berishni xohlaysiz?", reply_markup=get_active_polls_keyboard(unvoted_polls)); await state.set_state(VotingProcess.awaiting_poll_selection)
     else:
         if await captcha_service.is_user_blocked(user_id): await message.answer(f"Noto'g'ri. Urinishlar tugadi. Siz {settings.CAPTCHA_BLOCK_DURATION_MINUTES} daqiqaga bloklandingiz."); await state.clear()
         else: attempts_left = await captcha_service.get_attempts_left(user_id); await message.answer(f"Noto'g'ri. Yana {attempts_left} ta urinish qoldi.")
+
+@user_router.callback_query(F.data.startswith("select_poll:"), VotingProcess.awaiting_poll_selection)
+async def cb_select_poll(callback_query: CallbackQuery, state: FSMContext, session: AsyncSession):
+    poll_id = int(callback_query.data.split(":")[1])
+    poll = await get_poll_by_id(session, poll_id)
+    user_id = callback_query.from_user.id
+    if not poll or not poll.is_active:
+        await callback_query.answer("Bu so'rovnoma endi aktiv emas!", show_alert=True)
+        unvoted_polls = await get_unvoted_active_polls(session, user_id)
+        if not unvoted_polls: await callback_query.message.edit_text("Barcha so'rovnomalarda ishtirok etdingiz!"); await state.clear(); return
+        await callback_query.message.edit_text(f"<b>{len(unvoted_polls)}</b> ta aktiv so'rovnoma:", reply_markup=get_active_polls_keyboard(unvoted_polls)); return
+    if await has_user_voted(session, user_id, poll_id): await callback_query.answer("Bu so'rovnomada allaqachon ovoz bergansiz!", show_alert=True); return
+    await callback_query.message.edit_text(f"So'rovnoma:\n<b>{poll.question}</b>\n\nVariantni tanlang:", reply_markup=get_poll_options_keyboard(poll))
+    await state.set_state(VotingProcess.awaiting_vote_choice); await callback_query.answer()
 
 @user_router.callback_query(F.data.startswith("vote_poll:"), VotingProcess.awaiting_vote_choice)
 async def process_vote_choice(callback_query: CallbackQuery, state: FSMContext, session: AsyncSession, bot: Bot):
@@ -460,10 +480,17 @@ async def process_vote_choice(callback_query: CallbackQuery, state: FSMContext, 
     if await has_user_voted(session, user_id, poll_id): await callback_query.message.edit_text("Siz allaqachon ovoz bergansiz."); await state.clear(); return await callback_query.answer("Allaqon ovoz berilgan!", show_alert=True)
     try:
         await add_vote(session, user_id, poll_id, choice_key); choice_text = poll.options.get(choice_key, "")
-        await callback_query.message.edit_text(f"Ovozingiz qabul qilindi: <b>\"{choice_text}\"</b>.\nRahmat!"); await callback_query.answer("Ovozingiz qabul qilindi!", show_alert=True)
-    except IntegrityError: await callback_query.message.edit_text("Xatolik: Siz allaqachon ovoz bergansiz."); await callback_query.answer("Xatolik!", show_alert=True)
-    except Exception as e: logger.error(f"Ovoz berishda xato: {e}"); await callback_query.message.edit_text("Texnik nosozlik."); await callback_query.answer("Xatolik!", show_alert=True)
-    await state.clear()
+        await callback_query.answer("Ovozingiz qabul qilindi!", show_alert=True)
+        unvoted_polls = await get_unvoted_active_polls(session, user_id)
+        if not unvoted_polls:
+            await callback_query.message.edit_text(f"✅ Ovozingiz qabul qilindi: <b>\"{choice_text}\"</b>.\nBarcha so'rovnomalarda ishtirok etdingiz!"); await state.clear()
+        elif len(unvoted_polls) == 1:
+            next_poll = unvoted_polls[0]
+            await callback_query.message.edit_text(f"✅ Ovozingiz qabul qilindi: <b>\"{choice_text}\"</b>.\n\nYana bir so'rovnoma:\n<b>{next_poll.question}</b>\n\nVariantni tanlang:", reply_markup=get_poll_options_keyboard(next_poll)); await state.set_state(VotingProcess.awaiting_vote_choice)
+        else:
+            await callback_query.message.edit_text(f"✅ Ovozingiz qabul qilindi: <b>\"{choice_text}\"</b>.\n\nYana <b>{len(unvoted_polls)}</b> ta so'rovnoma bor:", reply_markup=get_active_polls_keyboard(unvoted_polls)); await state.set_state(VotingProcess.awaiting_poll_selection)
+    except IntegrityError: await callback_query.message.edit_text("Xatolik: Siz allaqachon ovoz bergansiz."); await callback_query.answer("Xatolik!", show_alert=True); await state.clear()
+    except Exception as e: logger.error(f"Ovoz berishda xato: {e}"); await callback_query.message.edit_text("Texnik nosozlik."); await callback_query.answer("Xatolik!", show_alert=True); await state.clear()
 
 async def main():
     redis_connection_params = {"host": settings.REDIS_HOST, "port": settings.REDIS_PORT}
