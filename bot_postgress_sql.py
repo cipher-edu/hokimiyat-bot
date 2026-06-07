@@ -190,24 +190,63 @@ async def check_all_channels_membership(bot: Bot, user_id: int) -> List[Dict[str
         logger.debug("Hech qanday majburiy kanal belgilanmagan.")
         return []
     for channel_id in required:
+        is_member = False
         try:
             logger.debug(f"Tekshirilmoqda kanal: {channel_id} uchun foydalanuvchi: {user_id}")
             member = await bot.get_chat_member(chat_id=channel_id, user_id=user_id)
-            if member.status not in ("member", "administrator", "creator"):
-                raise TelegramBadRequest("User is not a subscribed member")
-        except TelegramBadRequest as e:
+            is_member = member.status in ("member", "administrator", "creator")
+        except TelegramBadRequest:
+            is_member = False
+        except Exception as e:
+            logger.error(f"Kanal tekshirishda xatolik ({channel_id}): {e}", exc_info=True)
+            is_member = False
+        if not is_member:
             try:
                 chat = await bot.get_chat(channel_id)
-                invite_link = getattr(chat, 'invite_link', None) or (f"https://t.me/{chat.username}" if getattr(chat, 'username', None) else None)
+                invite_link = getattr(chat, 'invite_link', None) or (
+                    f"https://t.me/{chat.username}" if getattr(chat, 'username', None) else None
+                )
                 if invite_link:
                     unsubscribed.append({"title": chat.title or str(channel_id), "url": invite_link})
                 else:
                     logger.warning(f"Kanal ({channel_id}) uchun havola topilmadi.")
             except Exception as ex_info:
                 logger.error(f"Kanal ({channel_id}) ma'lumotini olishda xatolik: {ex_info}")
-        except Exception as e:
-            logger.error(f"Kanal tekshirishda kutilmagan xatolik ({channel_id}): {e}", exc_info=True)
+                if isinstance(channel_id, str) and channel_id.startswith('@'):
+                    username = channel_id.lstrip('@')
+                    unsubscribed.append({"title": channel_id, "url": f"https://t.me/{username}"})
+                    logger.info(f"Kanal ({channel_id}) uchun fallback URL ishlatildi.")
     return unsubscribed
+
+async def _channels_to_display(bot: Bot, channel_ids: list) -> List[Dict[str, str]]:
+    """Berilgan kanal ID larni faqat ko'rsatish uchun ma'lumot sifatida qaytaradi (a'zolik tekshirilmaydi)."""
+    channels = []
+    for channel_id in channel_ids:
+        try:
+            chat = await bot.get_chat(channel_id)
+            invite_link = getattr(chat, 'invite_link', None) or (
+                f"https://t.me/{chat.username}" if getattr(chat, 'username', None) else None
+            )
+            if invite_link:
+                channels.append({"title": chat.title or str(channel_id), "url": invite_link})
+            else:
+                logger.warning(f"Kanal ({channel_id}) uchun havola topilmadi.")
+        except Exception as e:
+            logger.error(f"Kanal ({channel_id}) get_chat xatolik: {e}")
+            # aiogram versiyasi Telegram'ning yangi fieldlarini taniy olmasa, username'dan URL yasaymiz
+            if isinstance(channel_id, str) and channel_id.startswith('@'):
+                username = channel_id.lstrip('@')
+                channels.append({"title": channel_id, "url": f"https://t.me/{username}"})
+                logger.info(f"Kanal ({channel_id}) uchun fallback URL ishlatildi.")
+    return channels
+
+async def get_optional_channels_for_display(bot: Bot) -> List[Dict[str, str]]:
+    """OPTIONAL_CHANNELS — faqat havola ko'rsatiladi, a'zolik tekshirilmaydi."""
+    return await _channels_to_display(bot, settings.OPTIONAL_CHANNELS)
+
+async def get_all_channels_for_display(bot: Bot) -> List[Dict[str, str]]:
+    """REQUIRED + OPTIONAL kanallarini ko'rsatish uchun (a'zolik tekshirilmaydi)."""
+    return await _channels_to_display(bot, settings.REQUIRED_CHANNELS + settings.OPTIONAL_CHANNELS)
 
 admin_router = Router(); admin_router.message.filter(F.from_user.id.in_(settings.ADMIN_IDS)); admin_router.callback_query.filter(F.from_user.id.in_(settings.ADMIN_IDS))
 user_router = Router()
@@ -302,16 +341,31 @@ async def broadcast_confirmation(message: Message, state: FSMContext, session: A
 
 @user_router.message(CommandStart())
 async def cmd_start(message: Message, state: FSMContext, session: AsyncSession, bot: Bot, command: CommandObject = None):
-    await state.clear(); await get_or_create_user(session, message.from_user.id, message.from_user.username, message.from_user.first_name)
-    unsubscribed = await check_all_channels_membership(bot, message.from_user.id)
+    await state.clear()
+    await get_or_create_user(session, message.from_user.id, message.from_user.username, message.from_user.first_name)
+    all_channels = await get_all_channels_for_display(bot)
     if command and command.args:
         try:
-            _, poll_id_str, choice_key = command.args.split("_"); poll_id = int(poll_id_str)
-            if unsubscribed: await message.answer("Ovoz berishdan avval kanallarga a'zo bo'ling:", reply_markup=get_channel_subscription_keyboard(unsubscribed)); await state.set_data({'deep_link_vote': (poll_id, choice_key)}); await state.set_state(VotingProcess.awaiting_subscription_check); return
-            await process_deep_link_vote(message, session, bot, poll_id, choice_key); return
-        except (ValueError, IndexError): pass
-    if unsubscribed: await message.answer("Assalomu alaykum! Ishtirok etish uchun kanallarga a'zo bo'ling:", reply_markup=get_channel_subscription_keyboard(unsubscribed)); await state.set_state(VotingProcess.awaiting_subscription_check)
-    else: await message.answer("Assalomu alaykum! Ovoz berish uchun telefon raqamingizni yuboring:", reply_markup=get_contact_keyboard()); await state.set_state(VotingProcess.awaiting_contact)
+            _, poll_id_str, choice_key = command.args.split("_")
+            poll_id = int(poll_id_str)
+            if all_channels:
+                await message.answer("Ovoz berishdan avval kanallarga a'zo bo'ling:", reply_markup=get_channel_subscription_keyboard(all_channels))
+                await state.set_data({'deep_link_vote': (poll_id, choice_key)})
+                await state.set_state(VotingProcess.awaiting_subscription_check)
+                return
+            await process_deep_link_vote(message, session, bot, poll_id, choice_key)
+            return
+        except (ValueError, IndexError):
+            pass
+    if all_channels:
+        await message.answer(
+            "Assalomu alaykum! Ishtirok etish uchun quyidagi kanallarga a'zo bo'ling:",
+            reply_markup=get_channel_subscription_keyboard(all_channels)
+        )
+        await state.set_state(VotingProcess.awaiting_subscription_check)
+    else:
+        await message.answer("Assalomu alaykum! Ovoz berish uchun telefon raqamingizni yuboring:", reply_markup=get_contact_keyboard())
+        await state.set_state(VotingProcess.awaiting_contact)
 
 async def process_deep_link_vote(message: Message, session: AsyncSession, bot: Bot, poll_id: int, choice_key: str):
     user_id = message.from_user.id; poll = await get_poll_by_id(session, poll_id)
@@ -323,14 +377,54 @@ async def process_deep_link_vote(message: Message, session: AsyncSession, bot: B
     except Exception as e: logger.error(f"Deep link ovoz berishda xato: {e}"); await message.answer("Xatolik yuz berdi.")
 
 @user_router.callback_query(F.data=="check_subscription", VotingProcess.awaiting_subscription_check)
-async def cb_check_subscription(callback_query: CallbackQuery, state: FSMContext, bot: Bot, session: AsyncSession):
+async def cb_check_subscription(callback_query: CallbackQuery, state: FSMContext, bot: Bot, session: AsyncSession, captcha_service: CaptchaService):
     await callback_query.answer("Tekshirilmoqda...", cache_time=1)
     unsubscribed = await check_all_channels_membership(bot, callback_query.from_user.id)
-    if unsubscribed: await callback_query.message.edit_text("Afsuski, hali ham barcha kanallarga a'zo emassiz.", reply_markup=get_channel_subscription_keyboard(unsubscribed, "🔄 Qayta tekshirish"))
+    if unsubscribed:
+        all_channels = await get_all_channels_for_display(bot)
+        await callback_query.message.edit_text(
+            "Afsuski, hali ham majburiy kanallarga a'zo emassiz.",
+            reply_markup=get_channel_subscription_keyboard(all_channels, "🔄 Qayta tekshirish")
+        )
+        return
+
+    await callback_query.message.delete()
+    user_id = callback_query.from_user.id
+    data = await state.get_data()
+
+    # Deep link orqali ovoz berish
+    deep_link_vote = data.get('deep_link_vote')
+    if deep_link_vote:
+        poll_id, choice_key = deep_link_vote
+        await process_deep_link_vote(callback_query.message, session, bot, poll_id, choice_key)
+        await state.clear()
+        return
+
+    # Faol so'rovnoma bormi?
+    active_poll = await get_active_poll(session)
+    if not active_poll:
+        await callback_query.message.answer("Hozircha aktiv so'rovnomalar yo'q.")
+        await state.clear()
+        return
+
+    # Allaqachon ovoz berganmi? (muammo #4)
+    if await has_user_voted(session, user_id, active_poll.id):
+        await callback_query.message.answer("✅ Siz bu so'rovnomada allaqachon ovoz bergansiz.")
+        await state.clear()
+        return
+
+    # Telefon raqami avval saqlangan bo'lsa, qayta so'ramaymiz (muammo #5)
+    user = await session.get(User, user_id)
+    if user and user.phone_number_encrypted:
+        question = await captcha_service.create_captcha(user_id)
+        await callback_query.message.answer(
+            f"Bot emasligingizni tasdiqlang ({settings.CAPTCHA_TIMEOUT_SECONDS}s):\n<b>{question}</b>",
+            reply_markup=remove_keyboard
+        )
+        await state.set_state(VotingProcess.awaiting_captcha)
     else:
-        await callback_query.message.delete(); data = await state.get_data(); deep_link_vote = data.get('deep_link_vote')
-        if deep_link_vote: poll_id, choice_key = deep_link_vote; await process_deep_link_vote(callback_query.message, session, bot, poll_id, choice_key); await state.clear(); return
-        await callback_query.message.answer("Rahmat! Endi telefon raqamingizni yuboring:", reply_markup=get_contact_keyboard()); await state.set_state(VotingProcess.awaiting_contact)
+        await callback_query.message.answer("Rahmat! Endi telefon raqamingizni yuboring:", reply_markup=get_contact_keyboard())
+        await state.set_state(VotingProcess.awaiting_contact)
 @user_router.message(F.contact, VotingProcess.awaiting_contact)
 async def handle_contact(message: Message, state: FSMContext, session: AsyncSession, crypto_service: CryptoService, captcha_service: CaptchaService):
     if await captcha_service.is_user_blocked(message.from_user.id): await message.answer(f"Siz {settings.CAPTCHA_BLOCK_DURATION_MINUTES} daqiqaga bloklangansiz.", reply_markup=remove_keyboard); await state.clear(); return
